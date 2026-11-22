@@ -1,81 +1,242 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api, jsonBody } from '../services/api.js';
 
-const dateFormat = new Intl.DateTimeFormat('id-ID', { dateStyle: 'medium', timeStyle: 'short' });
+import { useEffect, useState } from 'react';
+import {
+  getSpareParts,
+  getTransactions,
+  saveSpareParts,
+  saveTransactions
+} from '../services/storage.js';
+
 const numberFormat = new Intl.NumberFormat('id-ID');
+const dateFormat = new Intl.DateTimeFormat('id-ID', {
+  dateStyle: 'medium',
+  timeStyle: 'short'
+});
 
-export default function TransactionsPage({ isAdmin }) {
-  const [items, setItems] = useState([]);
+const emptyForm = {
+  sparePartId: '',
+  type: 'in',
+  quantity: '',
+  notes: ''
+};
+
+export default function TransactionsPage({ isAdmin, user }) {
   const [parts, setParts] = useState([]);
-  const [form, setForm] = useState({ sparePartId: '', type: 'in', quantity: '', notes: '' });
-  const [error, setError] = useState('');
+  const [transactions, setTransactions] = useState([]);
+  const [form, setForm] = useState(emptyForm);
   const [message, setMessage] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  const loadTransactions = useCallback(async () => {
-    const result = await api('/transactions');
-    setItems(result.items);
-  }, []);
+  function loadData() {
+    setParts(getSpareParts());
+    setTransactions(
+      getTransactions().sort(
+        (a, b) => new Date(b.created_at) - new Date(a.created_at)
+      )
+    );
+  }
 
   useEffect(() => {
-    async function load() {
-      setLoading(true);
-      try {
-        const [history, partList] = await Promise.all([
-          api('/transactions'),
-          isAdmin ? api('/spare-parts') : Promise.resolve({ items: [] })
-        ]);
-        setItems(history.items);
-        setParts(partList.items);
-      } catch (requestError) {
-        setError(requestError.message);
-      } finally {
-        setLoading(false);
-      }
-    }
-    load();
-  }, [isAdmin]);
+    loadData();
+  }, []);
 
-  async function submit(event) {
+  function handleChange(event) {
+    const { name, value } = event.target;
+    setForm((current) => ({ ...current, [name]: value }));
+  }
+
+  function handleSubmit(event) {
     event.preventDefault();
-    setError('');
     setMessage('');
-    try {
-      const result = await api('/transactions', {
-        method: 'POST',
-        body: jsonBody({ ...form, sparePartId: Number(form.sparePartId), quantity: Number(form.quantity) })
-      });
-      setMessage(result.message);
-      setForm({ ...form, quantity: '', notes: '' });
-      await loadTransactions();
-    } catch (requestError) {
-      setError(requestError.message);
+    setError('');
+
+    const sparePart = parts.find(
+      (item) => item.id === Number(form.sparePartId)
+    );
+    const quantity = Number(form.quantity);
+
+    if (!sparePart) {
+      setError('Pilih spare part terlebih dahulu.');
+      return;
     }
+
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      setError('Jumlah harus berupa angka lebih dari 0.');
+      return;
+    }
+
+    if (form.type === 'out' && quantity > sparePart.stock) {
+      setError('Stok spare part tidak mencukupi.');
+      return;
+    }
+
+    const updatedParts = parts.map((item) => {
+      if (item.id !== sparePart.id) return item;
+
+      return {
+        ...item,
+        stock:
+          form.type === 'in'
+            ? item.stock + quantity
+            : item.stock - quantity
+      };
+    });
+
+    const newTransaction = {
+      id: Date.now(),
+      spare_part_id: sparePart.id,
+      spare_part_code: sparePart.code,
+      spare_part_name: sparePart.name,
+      unit: sparePart.unit,
+      type: form.type,
+      quantity,
+      notes: form.notes.trim(),
+      recorded_by: user?.name || 'Admin',
+      created_at: new Date().toISOString()
+    };
+
+    const updatedTransactions = [
+      newTransaction,
+      ...transactions
+    ];
+
+    saveSpareParts(updatedParts);
+    saveTransactions(updatedTransactions);
+
+    setParts(updatedParts);
+    setTransactions(updatedTransactions);
+    setForm(emptyForm);
+    setMessage('Transaksi berhasil disimpan.');
   }
 
   return (
-    <>
-      <div className="page-heading"><div><p className="eyebrow">AKTIVITAS STOK</p><h1>Barang Masuk dan Keluar</h1><p className="muted">Catat perubahan stok dan lihat riwayat transaksi.</p></div></div>
-      {message && <p className="alert success" role="status">{message}</p>}
-      {error && <p className="alert error" role="alert">{error}</p>}
-      {isAdmin && <section className="panel transaction-form-panel"><div className="panel-heading"><div><h2>Catat transaksi</h2><p className="muted">Stok akan diperbarui setelah transaksi tersimpan.</p></div></div>
-        {!parts.length ? <p className="empty-state">Tambahkan data spare part sebelum mencatat transaksi.</p> :
-          <form onSubmit={submit} className="transaction-form">
-            <label>Jenis transaksi<select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}><option value="in">Barang masuk</option><option value="out">Barang keluar</option></select></label>
-            <label>Spare part<select required value={form.sparePartId} onChange={(e) => setForm({ ...form, sparePartId: e.target.value })}><option value="">Pilih spare part</option>{parts.map((part) => <option key={part.id} value={part.id}>{part.code} — {part.name} (stok {part.stock})</option>)}</select></label>
-            <label>Jumlah<input required type="number" min="1" step="1" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} /></label>
-            <label>Keterangan<input maxLength="500" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></label>
-            <button className="button primary transaction-submit" type="submit">Simpan transaksi</button>
-          </form>}
-      </section>}
+    <div className="page-content">
+      <div className="page-header">
+        <div>
+          <h1>Transaksi Stok</h1>
+          <p>Catat transaksi barang masuk dan keluar.</p>
+        </div>
+      </div>
+
+      {isAdmin && (
+        <section className="panel">
+          <div className="panel-heading">
+            <h2>Tambah Transaksi</h2>
+          </div>
+
+          <form onSubmit={handleSubmit}>
+            <div className="form-grid">
+              <div className="form-group">
+                <label>Spare Part</label>
+                <select
+                  name="sparePartId"
+                  value={form.sparePartId}
+                  onChange={handleChange}
+                  required
+                >
+                  <option value="">Pilih spare part</option>
+                  {parts.map((part) => (
+                    <option key={part.id} value={part.id}>
+                      {part.name} - Stok: {part.stock} {part.unit}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label>Jenis Transaksi</label>
+                <select
+                  name="type"
+                  value={form.type}
+                  onChange={handleChange}
+                >
+                  <option value="in">Barang Masuk</option>
+                  <option value="out">Barang Keluar</option>
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label>Jumlah</label>
+                <input
+                  type="number"
+                  name="quantity"
+                  min="1"
+                  value={form.quantity}
+                  onChange={handleChange}
+                  placeholder="Masukkan jumlah"
+                  required
+                />
+              </div>
+
+              <div className="form-group">
+                <label>Keterangan</label>
+                <input
+                  type="text"
+                  name="notes"
+                  value={form.notes}
+                  onChange={handleChange}
+                  placeholder="Masukkan keterangan"
+                />
+              </div>
+            </div>
+
+            {error && <p className="error-message">{error}</p>}
+            {message && <p className="success-message">{message}</p>}
+
+            <button type="submit" className="primary-button">
+              Simpan Transaksi
+            </button>
+          </form>
+        </section>
+      )}
+
       <section className="panel">
-        <div className="panel-heading"><div><h2>Riwayat transaksi</h2><p className="muted">Menampilkan hingga 500 transaksi terbaru.</p></div></div>
-        {loading ? <p className="status-message">Memuat riwayat...</p> : items.length === 0 ? <p className="empty-state">Belum ada transaksi yang tercatat.</p> :
-          <div className="table-wrap"><table><thead><tr><th>Tanggal</th><th>Spare part</th><th>Jenis</th><th>Jumlah</th><th>Dicatat oleh</th><th>Keterangan</th></tr></thead><tbody>
-            {items.map((row) => <tr key={row.id}><td>{dateFormat.format(new Date(row.created_at))}</td><td><strong>{row.spare_part_name}</strong><small className="cell-sub">{row.spare_part_code}</small></td>
-              <td><span className={`badge ${row.type}`}>{row.type === 'in' ? 'Barang masuk' : 'Barang keluar'}</span></td><td>{numberFormat.format(row.quantity)} {row.unit}</td><td>{row.recorded_by}</td><td>{row.notes || '—'}</td></tr>)}
-          </tbody></table></div>}
+        <div className="panel-heading">
+          <h2>Riwayat Transaksi</h2>
+        </div>
+
+        <div className="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Tanggal</th>
+                <th>Nama Spare Part</th>
+                <th>Jenis</th>
+                <th>Jumlah</th>
+                <th>Petugas</th>
+                <th>Keterangan</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {transactions.length > 0 ? (
+                transactions.map((item) => (
+                  <tr key={item.id}>
+                    <td>
+                      {dateFormat.format(new Date(item.created_at))}
+                    </td>
+                    <td>{item.spare_part_name}</td>
+                    <td>
+                      {item.type === 'in'
+                        ? 'Barang Masuk'
+                        : 'Barang Keluar'}
+                    </td>
+                    <td>
+                      {numberFormat.format(item.quantity)} {item.unit}
+                    </td>
+                    <td>{item.recorded_by}</td>
+                    <td>{item.notes || '—'}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan="6">Belum ada transaksi.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </section>
-    </>
+    </div>
   );
 }
